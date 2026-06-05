@@ -1,0 +1,4 @@
+
+تثبيت المكتبات: npm install express socket.io
+تشغيل السيرفر: node server.js
+الوصول للتطبيق عبر: http://localhost:3000
