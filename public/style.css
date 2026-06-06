@@ -1,0 +1,354 @@
+:root {
+    --primary-color: #2c3e50;
+    --secondary-color: #3498db;
+    --bg-color: #f4f7f6;
+    --text-color: #333;
+    --white: #ffffff;
+    --border-color: #ddd;
+    --private-msg-bg: #fff9c4;
+    --danger-color: #e74c3c;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.hidden { display: none !important; }
+
+/* Login Modal */
+.modal {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--white);
+    padding: 2rem;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    width: 350px;
+}
+
+.modal-content input {
+    width: 100%;
+    padding: 10px;
+    margin: 1.5rem 0;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+.modal-content button {
+    width: 100%;
+    padding: 10px;
+    background: var(--secondary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+/* App Layout */
+#app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+header {
+    background: var(--primary-color);
+    color: white;
+    padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.sidebar {
+    width: 250px;
+    background: var(--white);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+}
+
+.sidebar section {
+    padding: 1rem;
+    flex: 1;
+    overflow-y: auto;
+}
+
+.sidebar h3 {
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    color: #7f8c8d;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 5px;
+}
+
+.sidebar .hint {
+    font-size: 0.75rem;
+    color: #95a5a6;
+    margin-bottom: 0.5rem;
+    font-style: italic;
+}
+
+.sidebar ul {
+    list-style: none;
+}
+
+.sidebar li {
+    padding: 8px 12px;
+    margin: 4px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.sidebar li:hover { background: #f0f0f0; }
+.sidebar li.active { background: var(--secondary-color); color: white; }
+.sidebar li.private-selected { background: var(--danger-color); color: white; }
+
+.sidebar li .notification-badge {
+    display: inline-block;
+    background: var(--danger-color);
+    color: white;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    font-size: 0.7rem;
+    font-weight: bold;
+    text-align: center;
+    line-height: 20px;
+    margin-left: 8px;
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.chat-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: white;
+}
+
+.chat-header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    background: #fafafa;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#private-mode-indicator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--private-msg-bg);
+    border-radius: 4px;
+}
+
+.badge {
+    background: var(--danger-color);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
+#private-target-user {
+    font-weight: bold;
+    color: var(--danger-color);
+}
+
+.back-btn {
+    padding: 6px 12px;
+    background: var(--secondary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.back-btn:hover {
+    background: #2980b9;
+}
+
+.messages-container {
+    flex: 1;
+    padding: 1.5rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.message {
+    max-width: 70%;
+    padding: 10px 15px;
+    border-radius: 18px;
+    font-size: 0.95rem;
+    position: relative;
+    line-height: 1.4;
+    word-wrap: break-word;
+}
+
+.message.received {
+    align-self: flex-start;
+    background: #e9e9eb;
+    color: var(--text-color);
+}
+
+.message.sent {
+    align-self: flex-end;
+    background: var(--secondary-color);
+    color: white;
+}
+
+.message.private-received {
+    align-self: flex-start;
+    background: #e9e9eb;
+    color: var(--text-color);
+    border-left: 3px solid var(--danger-color);
+}
+
+.message.private-sent {
+    align-self: flex-end;
+    background: var(--secondary-color);
+    color: white;
+    border-right: 3px solid var(--danger-color);
+}
+
+.msg-meta {
+    font-size: 0.7rem;
+    margin-bottom: 4px;
+    opacity: 0.8;
+}
+
+.input-area {
+    padding: 1rem;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    gap: 10px;
+}
+
+.input-area input {
+    flex: 1;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 25px;
+    outline: none;
+}
+
+.input-area button {
+    padding: 0 20px;
+    background: var(--secondary-color);
+    color: white;
+    border: none;
+    border-radius: 25px;
+    cursor: pointer;
+}
+
+#attach-btn {
+    padding: 0 15px;
+    font-size: 1.2rem;
+    background: #95a5a6;
+}
+
+#attach-btn:hover {
+    background: #7f8c8d;
+}
+
+.file-attachment {
+    max-width: 70%;
+    padding: 10px 15px;
+    border-radius: 18px;
+    position: relative;
+    background: #f0f0f0;
+    border: 1px solid #ddd;
+}
+
+.file-attachment.sent {
+    align-self: flex-end;
+    background: var(--secondary-color);
+    color: white;
+}
+
+.file-attachment.received {
+    align-self: flex-start;
+    background: #e9e9eb;
+}
+
+.file-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.file-icon {
+    font-size: 1.5rem;
+}
+
+.file-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.file-name {
+    font-weight: bold;
+    word-break: break-all;
+}
+
+.file-size {
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+.system-msg {
+    text-align: center;
+    font-size: 0.8rem;
+    color: #95a5a6;
+    margin: 5px 0;
+    font-style: italic;
+}
+
+/* RTL/LTR Support */
+.message.rtl, .file-attachment.rtl {
+    direction: rtl;
+    text-align: right;
+}
+
+.message.ltr, .file-attachment.ltr {
+    direction: ltr;
+    text-align: left;
+}

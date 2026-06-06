@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Chat System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="login-container" class="modal">
+        <div class="modal-content">
+            <h2>Welcome to Chat System</h2>
+            <p>Please enter your username to join the network</p>
+            <input type="text" id="username-input" placeholder="Username..." maxlength="15">
+            <button id="join-btn">Join Chat</button>
+        </div>
+    </div>
+
+    <div id="app-container" class="hidden">
+        <header>
+            <div class="logo">NetworkChat v1.0</div>
+            <div class="user-info">
+                Logged in as: <span id="display-username"></span>
+            </div>
+        </header>
+
+        <main>
+            <aside class="sidebar">
+                <section class="rooms-section">
+                    <h3>Chat Rooms</h3>
+                    <ul id="rooms-list"></ul>
+                </section>
+                <section class="users-section">
+                    <h3>Online Users</h3>
+                    <p class="hint">Click a user to send private message</p>
+                    <ul id="users-list"></ul>
+                </section>
+            </aside>
+
+            <section class="chat-area">
+                <div class="chat-header">
+                    <h3 id="current-room-name">General</h3>
+                    <div id="private-mode-indicator" class="hidden">
+                        <span class="badge">Private Chat</span>
+                        <span id="private-target-user"></span>
+                        <button id="back-to-room-btn" class="back-btn">← Back to Room</button>
+                    </div>
+                </div>
+                <div id="messages-display" class="messages-container"></div>
+                <div class="input-area">
+                    <input type="text" id="message-input" placeholder="Type a message...">
+                    <input type="file" id="file-input" style="display: none;">
+                    <button id="attach-btn" title="Attach File">📎</button>
+                    <button id="send-btn">Send</button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
