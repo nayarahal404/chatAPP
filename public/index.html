@@ -278,7 +278,7 @@
             <h3 style="margin-top: 0; color: #333;">Incoming Voice Call</h3>
             <p id="caller-name-label" style="font-size: 16px; color: #666; margin-bottom: 24px; font-weight: bold;"></p>
             <div style="display: flex; gap: 12px; justify-content: center;">
-                <button type="button" id="accept-call-btn" style="background: #632ecc; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; flex: 1;">Accept</button>
+                <button type="button" id="accept-call-btn" style="background: #786bc0; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; flex: 1;">Accept</button>
                 <button type="button" id="decline-call-btn" style="background: #e74c3c; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; flex: 1;">Decline</button>
             </div>
         </div>
@@ -397,7 +397,7 @@
                         </div>
 
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <button type="button" id="call-btn" class="hidden" style="background: #632ecc; color: white; border: none; padding: 8px 16px; border-radius: 20px; font-weight: 600; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(46, 204, 113, 0.2); transition: all 0.2s;" title="Start Voice Call">
+                            <button type="button" id="call-btn" class="hidden" style="background: #786bc0; color: white; border: none; padding: 8px 16px; border-radius: 20px; font-weight: 600; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(46, 204, 113, 0.2); transition: all 0.2s;" title="Start Voice Call">
                                 📞 Call
                             </button>
                             <button type="button" id="hangup-btn" class="hidden" style="background: #e74c3c; color: white; border: none; padding: 8px 16px; border-radius: 20px; font-weight: 600; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(231, 76, 60, 0.2); transition: all 0.2s;" title="End Call">
@@ -418,8 +418,10 @@
                     <input type="text" id="message-input" placeholder="Type your message...">
                     <input type="file" id="file-input" style="display: none;">
                     <button id="attach-btn" title="Attach file">&#128206;</button>
+                    <button id="voice-btn" title="Press to end the voice note" style="background: #786bc0; color: white;">🎤</button>
                     <button id="send-btn">Send</button>
                 </div>
+                
             </section>
         </main>
     </div>

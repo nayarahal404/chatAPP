@@ -3,7 +3,7 @@ let currentRoom = 'General';
 let privateMessageTarget = null;
 let cachedUsersList = [];
 let localUnreadMap = {};
-// New global state tracking for public rooms unread message tallies
+// Global state tracking for public rooms unread message tallies
 let roomUnreadMap = {};
 
 // WebRTC State Variables
@@ -11,6 +11,12 @@ let localStream = null;
 let peerConnection = null;
 let activeCallTarget = null;
 let iceCandidateQueue = [];
+
+// Voice Recording State Variables
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let recordingStartTime = 0;
 
 // Initialize notification sound using a clean, open-source audio asset
 const notificationSound = new Audio('https://cdn.jsdelivr.net/gh/gcoro/larasound@master/public/sounds/ping.mp3');
@@ -27,6 +33,9 @@ const backToRoomBtn = document.getElementById('back-to-room-btn');
 // File Sharing UI References
 const fileBtn = document.getElementById('attach-btn');
 const fileInput = document.getElementById('file-input');
+
+// Voice Note UI Reference
+const voiceBtn = document.getElementById('voice-btn');
 
 // Call Controls UI References
 const callBtn = document.getElementById('call-btn');
@@ -45,21 +54,22 @@ window.onAuthenticated = function(data) {
     window.myUsername = data.username;
     myUsername = data.username;
     currentRoom = data.currentRoom || 'General';
-    
+
     localUnreadMap = data.unreadCounts || {};
     cachedUsersList = data.allUsers || [];
     roomUnreadMap = {}; // Reset local room tally
-    
+
     if (data.rooms) renderRooms(data.rooms);
     renderUsers(cachedUsersList);
-    
+
     messagesDisplay.innerHTML = '';
     if (data.roomHistory) {
         data.roomHistory.forEach(msg => displayMessage(msg));
     }
-    
+
     setupSocketListeners();
     setupFileSharingListeners();
+    setupVoiceNoteListeners();
     updateAppBranding();
 };
 
@@ -81,7 +91,6 @@ function setupSocketListeners() {
     });
 
     window.socket.on('receive-message', (data) => {
-        // Play notification audio alert if message comes from someone else
         if (data.from !== myUsername) {
             notificationSound.play().catch(err => console.log("Audio waiting for user interaction."));
         }
@@ -92,8 +101,10 @@ function setupSocketListeners() {
         if (privateMessageTarget) {
             if (isPrivateMsg && (data.from === privateMessageTarget || data.from === myUsername)) {
                 displayMessage(data);
+                if (data.from === privateMessageTarget) {
+                    window.socket.emit('load-private-history', privateMessageTarget);
+                }
             } else if (isPublicMsg) {
-                // If in DM mode, any public room message updates its badge count
                 updateRoomUnreadBadge(data.room);
             }
         } else {
@@ -101,10 +112,19 @@ function setupSocketListeners() {
                 if (data.room === currentRoom) {
                     displayMessage(data);
                 } else {
-                    // Message arrived in a channel the user isn't currently viewing
                     updateRoomUnreadBadge(data.room);
                 }
             }
+        }
+    });
+
+    window.socket.on('messages-read', (data) => {
+        if (privateMessageTarget && data.byUser === privateMessageTarget) {
+            document.querySelectorAll('.read-receipt').forEach(span => {
+                span.textContent = '✓✓';
+                span.style.color = '#3498db';
+                span.title = 'Read';
+            });
         }
     });
 
@@ -130,9 +150,8 @@ function setupSocketListeners() {
     });
 
     // ==================== WEBRTC INCOMING SIGNALS ====================
-    
     window.socket.on('incoming-call', async (data) => {
-        if (peerConnection) return; // Auto reject if already on a call
+        if (peerConnection) return;
 
         activeCallTarget = data.from;
         iceCandidateQueue = [];
@@ -152,21 +171,21 @@ function setupSocketListeners() {
             modal.classList.add('hidden');
             showCallUI(true);
             callStatus.textContent = `• Connecting...`;
-            
+
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 setupPeerConnection(data.from);
-                
+
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                
+
                 while (iceCandidateQueue.length > 0) {
                     const candidate = iceCandidateQueue.shift();
                     await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
                 }
-                
+
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                
+
                 window.socket.emit('answer-call', { to: data.from, answer: answer });
             } catch (err) {
                 console.error("Error answering call:", err);
@@ -185,7 +204,7 @@ function setupSocketListeners() {
         try {
             await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
             callStatus.textContent = `• Connected`;
-            
+
             while (iceCandidateQueue.length > 0) {
                 const candidate = iceCandidateQueue.shift();
                 await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -213,8 +232,118 @@ function setupSocketListeners() {
     });
 }
 
-// ==================== FILE SHARING MANAGEMENT LOGIC ====================
+// ==================== VOICE CHAT NOTES DRIVERS (TOGGLE MODE) ====================
+function setupVoiceNoteListeners() {
+    if (!voiceBtn) return;
 
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        voiceBtn.style.display = 'none';
+        console.warn('Voice engine is unavailable on this device configuration.');
+        return;
+    }
+
+    voiceBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!isRecording) {
+            startVoiceRecording();
+        } else {
+            stopVoiceRecording();
+        }
+    });
+}
+
+async function startVoiceRecording() {
+    if (isRecording || mediaRecorder) return;
+
+    audioChunks = [];
+    isRecording = true;
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        if (!isRecording) {
+            stream.getTracks().forEach(track => track.stop());
+            return;
+        }
+
+        let options = { mimeType: 'audio/webm;codecs=opus' };
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            options = { mimeType: 'audio/webm' };
+        }
+
+        mediaRecorder = new MediaRecorder(stream, options);
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+                audioChunks.push(event.data);
+            }
+        };
+
+        mediaRecorder.onstop = () => {
+            stream.getTracks().forEach(track => track.stop());
+
+            if (audioChunks.length === 0) {
+                console.warn("Audio data stream buffer was empty.");
+                resetVoiceButtonUI();
+                return;
+            }
+
+            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = () => {
+                const base64Audio = reader.result;
+                const payload = `__VOICE_NOTE__:${base64Audio}`;
+
+                if (privateMessageTarget) {
+                    window.socket.emit('private-message', { to: privateMessageTarget, text: payload });
+                } else {
+                    window.socket.emit('send-message', { text: payload });
+                }
+
+                resetVoiceButtonUI();
+            };
+        };
+
+        mediaRecorder.start(250);
+        recordingStartTime = Date.now();
+
+        voiceBtn.textContent = '🛑';
+        voiceBtn.style.background = '#e74c3c';
+    } catch (err) {
+        console.error('Microphone capability context access denied:', err);
+        resetVoiceButtonUI();
+    }
+}
+
+function stopVoiceRecording() {
+    if (!mediaRecorder || mediaRecorder.state === "inactive") {
+        resetVoiceButtonUI();
+        return;
+    }
+
+    const recordingDuration = Date.now() - recordingStartTime;
+
+    if (recordingDuration < 500) {
+        setTimeout(() => {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+            }
+        }, 500 - recordingDuration);
+    } else {
+        mediaRecorder.stop();
+    }
+}
+
+function resetVoiceButtonUI() {
+    isRecording = false;
+    mediaRecorder = null;
+    voiceBtn.textContent = '🎤';
+    voiceBtn.classList.remove('recording-active');
+    voiceBtn.style.background = '#786bc0';
+}
+
+// ==================== FILE SHARING MANAGEMENT LOGIC ====================
 function setupFileSharingListeners() {
     if (!fileBtn || !fileInput) return;
 
@@ -245,7 +374,7 @@ function setupFileSharingListeners() {
             } else {
                 window.socket.emit('send-file', filePayload);
             }
-            
+
             fileInput.value = '';
         };
 
@@ -254,7 +383,6 @@ function setupFileSharingListeners() {
 }
 
 // ==================== WEBRTC RTCCORE LOGIC ====================
-
 async function startVoiceCall() {
     if (!privateMessageTarget) return;
     activeCallTarget = privateMessageTarget;
@@ -265,10 +393,10 @@ async function startVoiceCall() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         setupPeerConnection(activeCallTarget);
-        
+
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
-        
+
         window.socket.emit('call-user', { to: activeCallTarget, offer: offer });
     } catch (err) {
         alert("Could not access microphone. Ensure HTTPS/Localhost connections.");
@@ -278,15 +406,15 @@ async function startVoiceCall() {
 
 function setupPeerConnection(targetUser) {
     peerConnection = new RTCPeerConnection(rtcConfig);
-    
+
     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-    
+
     peerConnection.onicecandidate = (event) => {
         if (event.candidate && window.socket) {
             window.socket.emit('ice-candidate', { to: targetUser, candidate: event.candidate });
         }
     };
-    
+
     peerConnection.ontrack = (event) => {
         let audioEl = document.getElementById('remote-audio-node');
         if (!audioEl) {
@@ -317,7 +445,7 @@ function cleanCallTracks() {
     showCallUI(false);
     activeCallTarget = null;
     iceCandidateQueue = [];
-    
+
     const modal = document.getElementById('incoming-call-modal');
     if (modal) modal.classList.add('hidden');
 
@@ -347,11 +475,10 @@ function showCallUI(onCall) {
 }
 
 // ==================== RENDERING UI CODE ====================
-
 function renderUsers(users) {
     const usersList = document.getElementById('users-list');
     if (!usersList) return;
-    
+
     usersList.innerHTML = '';
     const loggedInMe = (window.myUsername || myUsername || '').trim().toLowerCase();
 
@@ -383,7 +510,7 @@ function renderUsers(users) {
             badge.textContent = unreadCount;
             li.appendChild(badge);
         }
-        
+
         usersList.appendChild(li);
     });
 }
@@ -391,29 +518,27 @@ function renderUsers(users) {
 function renderRooms(rooms) {
     const roomsList = document.getElementById('rooms-list');
     if (!roomsList) return;
-    
+
     roomsList.innerHTML = '';
     rooms.forEach(roomName => {
         const name = typeof roomName === 'string' ? roomName : roomName.room_name;
         const li = document.createElement('li');
-        
-        // Add data attribute for straightforward CSS/JS lookups
+
         li.setAttribute('data-room-name', name);
 
         const nameSpan = document.createElement('span');
         nameSpan.textContent = name;
         li.appendChild(nameSpan);
-        
+
         if (name === currentRoom && !privateMessageTarget) {
             li.classList.add('active');
         }
-        
+
         li.onclick = function() {
             exitPrivateMode();
             switchRoom(name);
         };
 
-        // Render any active pending unread counts for general rooms
         const roomUnreadCount = roomUnreadMap[name] || 0;
         if (roomUnreadCount > 0 && (privateMessageTarget || name !== currentRoom)) {
             const roomBadge = document.createElement('span');
@@ -421,7 +546,7 @@ function renderRooms(rooms) {
             roomBadge.textContent = roomUnreadCount;
             li.appendChild(roomBadge);
         }
-        
+
         roomsList.appendChild(li);
     });
 }
@@ -429,7 +554,7 @@ function renderRooms(rooms) {
 function updateRoomUnreadBadge(roomName, serverCount) {
     const finalCount = serverCount !== undefined ? serverCount : (roomUnreadMap[roomName] || 0) + 1;
     roomUnreadMap[roomName] = finalCount;
-    
+
     const roomLi = document.querySelector(`[data-room-name="${roomName}"]`);
     if (roomLi) {
         let badge = roomLi.querySelector('.room-badge');
@@ -447,15 +572,14 @@ function enterPrivateMode(targetUsername) {
     currentRoomName.classList.add('hidden');
     privateModeIndicator.classList.remove('hidden');
     privateTargetUser.textContent = targetUsername;
-    
+
     callBtn.classList.remove('hidden');
-    
-    // --- FIXED HERE: Remove the .active background color from public chat list items ---
+
     const allRoomItems = document.querySelectorAll('#rooms-list li');
     allRoomItems.forEach(item => {
         item.classList.remove('active');
     });
-    
+
     localUnreadMap[targetUsername] = 0;
     renderUsers(cachedUsersList);
     window.socket.emit('load-private-history', targetUsername);
@@ -465,27 +589,25 @@ function exitPrivateMode() {
     privateMessageTarget = null;
     privateModeIndicator.classList.add('hidden');
     currentRoomName.classList.remove('hidden');
-    
+
     cleanCallTracks();
     callBtn.classList.add('hidden');
-    
+
     switchRoom(currentRoom);
 }
 
 function switchRoom(roomName) {
     currentRoom = roomName;
     currentRoomName.textContent = roomName;
-    
-    // Clear unread values when entering a public channel
+
     roomUnreadMap[roomName] = 0;
-    
+
     const roomLi = document.querySelector(`[data-room-name="${roomName}"]`);
     if (roomLi) {
         const badge = roomLi.querySelector('.room-badge');
         if (badge) badge.remove();
     }
-    
-    // Update active classes around rooms elements list
+
     const allRoomItems = document.querySelectorAll('#rooms-list li');
     allRoomItems.forEach(item => {
         if (item.getAttribute('data-room-name') === roomName) {
@@ -501,7 +623,7 @@ function switchRoom(roomName) {
 function sendMessage() {
     const text = messageInput.value.trim();
     if (!text || !window.socket) return;
-    
+
     if (privateMessageTarget) {
         window.socket.emit('private-message', {
             to: privateMessageTarget,
@@ -512,7 +634,7 @@ function sendMessage() {
             text: text
         });
     }
-    
+
     messageInput.value = '';
     messageInput.focus();
 }
@@ -521,7 +643,7 @@ function displayMessage(data) {
     let sender = data.from || data.username || data.sender_username;
     let rawText = data.text || data.message_text;
     const timeStampStr = data.time || data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
+
     if (!sender) return;
 
     let fileData = data.fileData;
@@ -557,25 +679,49 @@ function displayMessage(data) {
     metaDiv.className = 'msg-meta';
     metaDiv.textContent = sender === loginUserMatch ? `You • ${timeStampStr}` : `${sender} • ${timeStampStr}`;
     bubbleCard.appendChild(metaDiv);
-    
+
     const textDiv = document.createElement('div');
     textDiv.className = 'msg-text';
 
-    if (isFileType) {
-        if (fileType && fileType.startsWith('image/')) {
-            textDiv.innerHTML = `<img src="${fileData}" style="max-width: 200px; display: block; border-radius: 4px; margin-top: 4px;" alt="${fileName || 'Image'}"/>`;
+    let readReceiptHtml = '';
+    if (sender === loginUserMatch && (data.type === 'private' || data.type === 'private-file' || privateMessageTarget)) {
+        if (data.isRead === true || data.is_read === true || data.read === true) {
+            readReceiptHtml = `<span class="read-receipt" style="margin-left: 6px; font-size: 11px; color: #2d7ecb; font-weight: bold;" title="Read">✓✓</span>`;
         } else {
-            textDiv.innerHTML = `<a href="${fileData}" download="${fileName || 'file'}" style="color: #667eea; text-decoration: underline; font-weight: bold;">📥 Download ${fileName || 'Attachment'}</a>`;
+            readReceiptHtml = `<span class="read-receipt" style="margin-left: 6px; font-size: 11px; color: #2d7ecb;" title="Sent">✓</span>`;
+        }
+    }
+
+    if (rawText && rawText.startsWith('__VOICE_NOTE__:')) {
+        const audioSrc = rawText.split('__VOICE_NOTE__:')[1];
+        textDiv.innerHTML = `
+            <audio controls src="${audioSrc}" style="margin-top: 5px; max-width: 100%; height: 36px; display: block;"></audio>
+            ${readReceiptHtml}
+        `;
+    } else if (isFileType) {
+        if (fileType && fileType.startsWith('image/')) {
+            textDiv.innerHTML = `
+                <img src="${fileData}" style="max-width: 200px; display: block; border-radius: 4px; margin-top: 4px;" alt="${fileName || 'Image'}"/>
+                ${readReceiptHtml}
+            `;
+        } else {
+            textDiv.innerHTML = `
+                <a href="${fileData}" download="${fileName || 'file'}" style="color: #667eea; text-decoration: underline; font-weight: bold;">📥 Download ${fileName || 'Attachment'}</a>
+                ${readReceiptHtml}
+            `;
         }
     } else {
         if (!rawText) return;
-        textDiv.textContent = rawText;
+        textDiv.innerHTML = `
+            <span style="display:inline-block; word-break:break-word;">${rawText}</span>
+            ${readReceiptHtml}
+        `;
     }
-    
+
     bubbleCard.appendChild(textDiv);
     msgContainer.appendChild(bubbleCard);
     messagesDisplay.appendChild(msgContainer);
-    
+
     messagesDisplay.scrollTop = messagesDisplay.scrollHeight;
 }
 
