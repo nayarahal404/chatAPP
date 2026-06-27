@@ -1,466 +1,587 @@
-const socket = io();
+let myUsername = '';
+let currentRoom = 'General';
+let privateMessageTarget = null;
+let cachedUsersList = [];
+let localUnreadMap = {};
+// New global state tracking for public rooms unread message tallies
+let roomUnreadMap = {};
 
-// DOM Elements
-const loginContainer = document.getElementById('login-container');
-const appContainer = document.getElementById('app-container');
-const usernameInput = document.getElementById('username-input');
-const joinBtn = document.getElementById('join-btn');
-const displayUsername = document.getElementById('display-username');
-const roomsList = document.getElementById('rooms-list');
-const usersList = document.getElementById('users-list');
-const messagesDisplay = document.getElementById('messages-display');
+// WebRTC State Variables
+let localStream = null;
+let peerConnection = null;
+let activeCallTarget = null;
+let iceCandidateQueue = [];
+
+// Initialize notification sound using a clean, open-source audio asset
+const notificationSound = new Audio('https://cdn.jsdelivr.net/gh/gcoro/larasound@master/public/sounds/ping.mp3');
+
+// UI References
 const messageInput = document.getElementById('message-input');
 const sendBtn = document.getElementById('send-btn');
-const attachBtn = document.getElementById('attach-btn');
-const fileInput = document.getElementById('file-input');
+const messagesDisplay = document.getElementById('messages-display');
 const currentRoomName = document.getElementById('current-room-name');
 const privateModeIndicator = document.getElementById('private-mode-indicator');
 const privateTargetUser = document.getElementById('private-target-user');
 const backToRoomBtn = document.getElementById('back-to-room-btn');
 
-let myUsername = '';
-let mySessionId = '';
-let currentRoom = 'General';
-let privateMessageTarget = null; // null = room mode, username = private mode
-let privateMessageTargetSessionId = null; // Session ID of the private message target
-let unreadMessages = new Map(); // username-sessionId -> count of unread messages
-let unreadRooms = new Map(); // roomName -> count of unread messages
+// File Sharing UI References
+const fileBtn = document.getElementById('attach-btn');
+const fileInput = document.getElementById('file-input');
 
-// --- Login Logic ---
-joinBtn.addEventListener('click', () => {
-    const username = usernameInput.value.trim();
-    if (username) {
-        socket.emit('set-username', username);
-    }
-});
+// Call Controls UI References
+const callBtn = document.getElementById('call-btn');
+const hangupBtn = document.getElementById('hangup-btn');
+const callStatus = document.getElementById('call-status');
 
-usernameInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') joinBtn.click();
-});
+// Free STUN Server configuration to gather network configurations
+const rtcConfig = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+};
 
-// --- Socket Events ---
-
-socket.on('init-data', (data) => {
+window.onAuthenticated = function(data) {
+    window.myUsername = data.username;
     myUsername = data.username;
-    mySessionId = data.allUsers.find(u => u.username === data.username)?.sessionId || '';
-    currentRoom = data.currentRoom;
+    currentRoom = data.currentRoom || 'General';
     
-    displayUsername.textContent = `${myUsername} (${mySessionId.substring(0, 8)}...)`;
-    loginContainer.classList.add('hidden');
-    appContainer.classList.remove('hidden');
+    localUnreadMap = data.unreadCounts || {};
+    cachedUsersList = data.allUsers || [];
+    roomUnreadMap = {}; // Reset local room tally
     
-    renderRooms(data.rooms);
-    renderUsers(data.allUsers);
+    if (data.rooms) renderRooms(data.rooms);
+    renderUsers(cachedUsersList);
     
-    // Load and display room history
-    if (data.roomHistory && data.roomHistory.length > 0) {
-        data.roomHistory.forEach(msg => {
-            appendMessage(msg);
-        });
-    }
-    
-    addSystemMessage(`Welcome ${myUsername}! You joined ${currentRoom}.`);
-});
-
-socket.on('update-user-list', (users) => {
-    renderUsers(users);
-});
-
-socket.on('room-switched', (data) => {
-    currentRoom = data.room;
-    currentRoomName.textContent = currentRoom;
-    messagesDisplay.innerHTML = ''; // Clear chat for new room
-    
-    // Clear unread count for this room
-    unreadRooms.delete(currentRoom);
-    updateRoomNotifications();
-    
-    // Load and display room history
-    if (data.history && data.history.length > 0) {
-        data.history.forEach(msg => {
-            appendMessage(msg);
-        });
-    }
-    
-    addSystemMessage(`You joined room: ${currentRoom}`);
-    renderRoomsActiveState();
-    
-    // Exit private mode when switching rooms
-    if (privateMessageTarget) {
-        exitPrivateMode(false); 
-    }
-});
-
-socket.on('receive-message', (msg) => {
-    if (msg.type === 'private' || msg.type === 'private-file') {
-        // --- Private Message Handling ---
-        if ((privateMessageTarget === msg.from && privateMessageTargetSessionId === msg.sessionId) || 
-            (msg.from === myUsername && msg.sessionId === mySessionId)) {
-            appendMessage(msg);
-            if (msg.from !== myUsername) {
-                const key = `${msg.from}-${msg.sessionId}`;
-                unreadMessages.delete(key);
-                updateUserNotifications();
-            }
-        } else {
-            // Unread private message
-            const key = `${msg.from}-${msg.sessionId}`;
-            const currentCount = unreadMessages.get(key) || 0;
-            unreadMessages.set(key, currentCount + 1);
-            updateUserNotifications();
-            playNotificationSound();
-        }
-    } else {
-        // --- Room Message Handling ---
-        // 1. If we are in the same room AND NOT in private mode
-        if (!privateMessageTarget && currentRoom === msg.room) {
-            appendMessage(msg);
-        } 
-        // 2. If we are in a different room OR in private mode
-        else {
-            if (msg.from !== myUsername) {
-                const currentCount = unreadRooms.get(msg.room) || 0;
-                unreadRooms.set(msg.room, currentCount + 1);
-                updateRoomNotifications();
-                playNotificationSound();
-            }
-        }
-    }
-});
-
-socket.on('private-history-loaded', (data) => {
     messagesDisplay.innerHTML = '';
-    if (data.history && data.history.length > 0) {
-        data.history.forEach(msg => {
-            appendMessage(msg);
-        });
+    if (data.roomHistory) {
+        data.roomHistory.forEach(msg => displayMessage(msg));
     }
-    const key = `${data.targetUsername}-${privateMessageTargetSessionId}`;
-    unreadMessages.delete(key);
-    updateUserNotifications();
-});
-
-socket.on('user-joined', (data) => {
-    addSystemMessage(`${data.username} (${data.sessionId.substring(0, 8)}...) joined the room.`);
-});
-
-socket.on('user-left', (data) => {
-    addSystemMessage(`${data.username} (${data.sessionId.substring(0, 8)}...) left the room.`);
-});
-
-socket.on('error-msg', (msg) => {
-    alert(msg);
-});
-
-// --- UI Rendering Functions ---
-
-function renderRooms(rooms) {
-    roomsList.innerHTML = '';
-    rooms.forEach(room => {
-        const li = document.createElement('li');
-        li.dataset.room = room;
-        
-        const roomSpan = document.createElement('span');
-        roomSpan.textContent = room;
-        li.appendChild(roomSpan);
-        
-        if (room === currentRoom && !privateMessageTarget) li.classList.add('active');
-        
-        li.addEventListener('click', () => {
-            if (room !== currentRoom || privateMessageTarget) {
-                socket.emit('join-room', room);
-            }
-        });
-        roomsList.appendChild(li);
-    });
-    updateRoomNotifications();
-}
-
-function renderRoomsActiveState() {
-    document.querySelectorAll('#rooms-list li').forEach(li => {
-        li.classList.toggle('active', li.dataset.room === currentRoom && !privateMessageTarget);
-    });
-}
-
-function updateRoomNotifications() {
-    const roomElements = document.querySelectorAll('#rooms-list li');
-    roomElements.forEach(li => {
-        const roomName = li.dataset.room;
-        
-        const oldBadge = li.querySelector('.notification-badge');
-        if (oldBadge) oldBadge.remove();
-        
-        if (unreadRooms.has(roomName)) {
-            const badge = document.createElement('span');
-            badge.classList.add('notification-badge');
-            badge.textContent = unreadRooms.get(roomName);
-            li.appendChild(badge);
-        }
-    });
-}
-
-function renderUsers(users) {
-    usersList.innerHTML = '';
-    users.forEach(user => {
-        const li = document.createElement('li');
-        const userSpan = document.createElement('span');
-        const displayText = user.username === myUsername ? 
-            `${user.username} (You)` : 
-            `${user.username} (${user.sessionId.substring(0, 8)}...)`;
-        userSpan.textContent = displayText;
-        li.appendChild(userSpan);
-        
-        if (user.username !== myUsername || user.sessionId !== mySessionId) {
-            li.title = 'Click to send private message';
-            li.addEventListener('click', () => {
-                enterPrivateMode(user.username, user.sessionId);
-            });
-            if (user.username === privateMessageTarget && user.sessionId === privateMessageTargetSessionId) {
-                li.classList.add('private-selected');
-            }
-        }
-        usersList.appendChild(li);
-    });
-    updateUserNotifications();
-}
-
-function updateUserNotifications() {
-    const userElements = document.querySelectorAll('#users-list li');
-    userElements.forEach(li => {
-        const userSpan = li.querySelector('span');
-        if (!userSpan) return;
-        
-        const oldBadge = li.querySelector('.notification-badge');
-        if (oldBadge) oldBadge.remove();
-        
-        // Check all unread messages for this user
-        for (let [key, count] of unreadMessages.entries()) {
-            const [username, sessionId] = key.split('-');
-            const displayText = `${username} (${sessionId.substring(0, 8)}...)`;
-            if (userSpan.textContent.includes(displayText) || userSpan.textContent.includes(username)) {
-                const badge = document.createElement('span');
-                badge.classList.add('notification-badge');
-                badge.textContent = count;
-                li.appendChild(badge);
-                break;
-            }
-        }
-    });
-}
-
-function enterPrivateMode(targetUsername, targetSessionId) {
-    privateMessageTarget = targetUsername;
-    privateMessageTargetSessionId = targetSessionId;
-    privateModeIndicator.classList.remove('hidden');
-    privateTargetUser.textContent = `with ${targetUsername} (${targetSessionId.substring(0, 8)}...)`;
-    messageInput.placeholder = `Private message to ${targetUsername}...`;
     
-    document.querySelectorAll('#users-list li').forEach(li => {
-        const span = li.querySelector('span');
-        if (span && span.textContent.includes(targetUsername) && span.textContent.includes(targetSessionId.substring(0, 8))) {
-            li.classList.add('private-selected');
+    setupSocketListeners();
+    setupFileSharingListeners();
+    updateAppBranding();
+};
+
+function updateAppBranding() {
+    const logoEl = document.querySelector('header .logo');
+    if (logoEl) logoEl.textContent = 'VeloChat';
+}
+
+function setupSocketListeners() {
+    if (!window.socket) return;
+
+    window.socket.on('update-room-unread-count', (data) => {
+        updateRoomUnreadBadge(data.room, data.count);
+    });
+
+    window.socket.on('update-user-list', (users) => {
+        cachedUsersList = users;
+        renderUsers(cachedUsersList);
+    });
+
+    window.socket.on('receive-message', (data) => {
+        // Play notification audio alert if message comes from someone else
+        if (data.from !== myUsername) {
+            notificationSound.play().catch(err => console.log("Audio waiting for user interaction."));
+        }
+
+        const isPublicMsg = data.type === 'public' || data.type === 'public-file';
+        const isPrivateMsg = data.type === 'private' || data.type === 'private-file';
+
+        if (privateMessageTarget) {
+            if (isPrivateMsg && (data.from === privateMessageTarget || data.from === myUsername)) {
+                displayMessage(data);
+            } else if (isPublicMsg) {
+                // If in DM mode, any public room message updates its badge count
+                updateRoomUnreadBadge(data.room);
+            }
         } else {
-            li.classList.remove('private-selected');
+            if (isPublicMsg) {
+                if (data.room === currentRoom) {
+                    displayMessage(data);
+                } else {
+                    // Message arrived in a channel the user isn't currently viewing
+                    updateRoomUnreadBadge(data.room);
+                }
+            }
         }
     });
-    
-    document.querySelectorAll('#rooms-list li').forEach(li => {
-        li.classList.remove('active');
-    });
-    
-    socket.emit('load-private-history', targetUsername);
-    addSystemMessage(`Now chatting privately with ${targetUsername} (${targetSessionId.substring(0, 8)}...)`);
-}
 
-function exitPrivateMode(clearDisplay = true) {
-    privateMessageTarget = null;
-    privateMessageTargetSessionId = null;
-    if (clearDisplay) {
+    window.socket.on('update-unread-count', (data) => {
+        localUnreadMap[data.from] = data.count;
+        renderUsers(cachedUsersList);
+    });
+
+    window.socket.on('room-switched', (data) => {
         messagesDisplay.innerHTML = '';
-        socket.emit('join-room', currentRoom);
-    }
-    
-    privateModeIndicator.classList.add('hidden');
-    messageInput.placeholder = 'Type a message...';
-    
-    unreadRooms.delete(currentRoom);
-    updateRoomNotifications();
-    
-    document.querySelectorAll('#users-list li').forEach(li => {
-        li.classList.remove('private-selected');
+        if (data.history) {
+            data.history.forEach(msg => displayMessage(msg));
+        }
     });
-    
-    renderRoomsActiveState();
-}
 
-backToRoomBtn.addEventListener('click', () => {
-    exitPrivateMode();
-});
-
-// --- Language Detection Function ---
-function detectLanguage(text) {
-    const arabicRegex = /[\u0600-\u06FF]/g;
-    const arabicChars = (text.match(arabicRegex) || []).length;
-    const totalChars = text.length;
-    return arabicChars > totalChars / 2 ? 'rtl' : 'ltr';
-}
-
-function appendMessage(msg) {
-    const div = document.createElement('div');
-    
-    const isSentByMe = msg.from === myUsername && msg.sessionId === mySessionId;
-    
-    // Handle file attachments
-    if (msg.type === 'public-file' || msg.type === 'private-file') {
-        div.classList.add('file-attachment');
-        div.classList.add(isSentByMe ? 'sent' : 'received');
-        
-        const senderDisplay = isSentByMe ? 'You' : `${msg.from} (${msg.sessionId.substring(0, 8)}...)`;
-        const fileIcon = getFileIcon(msg.fileType);
-        const fileSizeKB = (msg.fileContent.length / 1024).toFixed(2);
-        
-        div.innerHTML = `<div class="msg-meta">${senderDisplay} • ${msg.time}</div>
-                         <div class="file-info">
-                             <div class="file-icon">${fileIcon}</div>
-                             <div class="file-details">
-                                 <div class="file-name">${msg.fileName}</div>
-                                 <div class="file-size">${fileSizeKB} KB</div>
-                             </div>
-                         </div>`;
-        
-        // Add download button for received files
-        if (!isSentByMe) {
-            const downloadBtn = document.createElement('button');
-            downloadBtn.textContent = 'Download';
-            downloadBtn.style.marginTop = '8px';
-            downloadBtn.style.padding = '6px 12px';
-            downloadBtn.style.background = '#3498db';
-            downloadBtn.style.color = 'white';
-            downloadBtn.style.border = 'none';
-            downloadBtn.style.borderRadius = '4px';
-            downloadBtn.style.cursor = 'pointer';
-            downloadBtn.addEventListener('click', () => {
-                downloadFile(msg.fileContent, msg.fileName);
-            });
-            div.appendChild(downloadBtn);
+    window.socket.on('private-history-loaded', (data) => {
+        if (privateMessageTarget === data.targetUsername) {
+            messagesDisplay.innerHTML = '';
+            if (data.history) {
+                data.history.forEach(msg => displayMessage(msg));
+            }
         }
-    } else {
-        // Handle text messages
-        div.classList.add('message');
-        
-        if (msg.type === 'private') {
-            div.classList.add(isSentByMe ? 'private-sent' : 'private-received');
-        } else {
-            div.classList.add(isSentByMe ? 'sent' : 'received');
-        }
-        
-        // Detect language and add RTL/LTR class
-        const lang = detectLanguage(msg.text);
-        div.classList.add(lang);
-        
-        const senderDisplay = isSentByMe ? 'You' : `${msg.from} (${msg.sessionId.substring(0, 8)}...)`;
-        div.innerHTML = `<div class="msg-meta">${senderDisplay} • ${msg.time}</div>
-                         <div class="msg-text">${msg.text}</div>`;
-    }
+    });
+
+    // ==================== WEBRTC INCOMING SIGNALS ====================
     
-    messagesDisplay.appendChild(div);
-    messagesDisplay.scrollTop = messagesDisplay.scrollHeight;
-}
+    window.socket.on('incoming-call', async (data) => {
+        if (peerConnection) return; // Auto reject if already on a call
 
-function getFileIcon(fileType) {
-    if (fileType.startsWith('image/')) return '🖼️';
-    if (fileType.startsWith('video/')) return '🎥';
-    if (fileType.startsWith('audio/')) return '🎵';
-    if (fileType.includes('pdf')) return '📄';
-    if (fileType.includes('word') || fileType.includes('document')) return '📝';
-    if (fileType.includes('sheet') || fileType.includes('excel')) return '📊';
-    return '📎';
-}
+        activeCallTarget = data.from;
+        iceCandidateQueue = [];
 
-function downloadFile(base64Content, fileName) {
-    const link = document.createElement('a');
-    link.href = 'data:application/octet-stream;base64,' + base64Content;
-    link.download = fileName;
-    link.click();
-}
+        const modal = document.getElementById('incoming-call-modal');
+        const callerLabel = document.getElementById('caller-name-label');
+        const acceptBtn = document.getElementById('accept-call-btn');
+        const declineBtn = document.getElementById('decline-call-btn');
 
-function addSystemMessage(text) {
-    const div = document.createElement('div');
-    div.classList.add('system-msg');
-    div.textContent = text;
-    messagesDisplay.appendChild(div);
-    messagesDisplay.scrollTop = messagesDisplay.scrollHeight;
-}
+        callerLabel.textContent = `${data.from} is calling...`;
+        modal.classList.remove('hidden');
 
-function playNotificationSound() {
-    try {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        oscillator.frequency.value = 800;
-        oscillator.type = 'sine';
-        gain.gain.setValueAtTime(0.3, audioContext.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + 0.1);
-    } catch(e) { console.log('Audio error:', e); }
-}
+        acceptBtn.onclick = null;
+        declineBtn.onclick = null;
 
-// --- File Attachment Handling ---
-attachBtn.addEventListener('click', () => {
-    fileInput.click();
-});
-
-fileInput.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) {
-        // Limit file size to 5MB
-        if (file.size > 5 * 1024 * 1024) {
-            alert('File size must be less than 5MB');
-            return;
-        }
-        
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const base64Content = event.target.result.split(',')[1]; // Remove data:... prefix
+        acceptBtn.onclick = async () => {
+            modal.classList.add('hidden');
+            showCallUI(true);
+            callStatus.textContent = `• Connecting...`;
             
-            if (privateMessageTarget) {
-                socket.emit('send-file', {
-                    fileName: file.name,
-                    fileType: file.type,
-                    fileContent: base64Content,
-                    to: privateMessageTarget,
-                    isPrivate: true
-                });
-            } else {
-                socket.emit('send-file', {
-                    fileName: file.name,
-                    fileType: file.type,
-                    fileContent: base64Content,
-                    isPrivate: false
-                });
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                setupPeerConnection(data.from);
+                
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                
+                while (iceCandidateQueue.length > 0) {
+                    const candidate = iceCandidateQueue.shift();
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                }
+                
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
+                window.socket.emit('answer-call', { to: data.from, answer: answer });
+            } catch (err) {
+                console.error("Error answering call:", err);
+                endCall();
             }
         };
-        reader.readAsDataURL(file);
-        fileInput.value = ''; // Reset file input
-    }
-});
 
-sendBtn.addEventListener('click', () => {
-    const text = messageInput.value.trim();
-    if (text) {
-        if (privateMessageTarget) {
-            socket.emit('private-message', { to: privateMessageTarget, text });
-        } else {
-            socket.emit('send-message', { text });
+        declineBtn.onclick = () => {
+            modal.classList.add('hidden');
+            window.socket.emit('end-call', { to: data.from });
+            cleanCallTracks();
+        };
+    });
+
+    window.socket.on('call-answered', async (data) => {
+        try {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            callStatus.textContent = `• Connected`;
+            
+            while (iceCandidateQueue.length > 0) {
+                const candidate = iceCandidateQueue.shift();
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+        } catch (err) {
+            console.error("Error setting up remote answer:", err);
+            endCall();
         }
-        messageInput.value = '';
-        messageInput.focus();
-    }
-});
+    });
 
-messageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') sendBtn.click();
-});
+    window.socket.on('ice-candidate', async (data) => {
+        try {
+            if (peerConnection && peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } else {
+                iceCandidateQueue.push(data.candidate);
+            }
+        } catch (err) {
+            console.error("Error adding ICE Candidate:", err);
+        }
+    });
+
+    window.socket.on('call-ended', () => {
+        cleanCallTracks();
+    });
+}
+
+// ==================== FILE SHARING MANAGEMENT LOGIC ====================
+
+function setupFileSharingListeners() {
+    if (!fileBtn || !fileInput) return;
+
+    fileBtn.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        if (file.size > 10 * 1024 * 1024) {
+            alert("File is too large! Maximum limit allowed is 10MB.");
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const filePayload = {
+                fileName: file.name,
+                fileType: file.type,
+                fileData: e.target.result
+            };
+
+            if (privateMessageTarget) {
+                filePayload.to = privateMessageTarget;
+                window.socket.emit('private-file', filePayload);
+            } else {
+                window.socket.emit('send-file', filePayload);
+            }
+            
+            fileInput.value = '';
+        };
+
+        reader.readAsDataURL(file);
+    });
+}
+
+// ==================== WEBRTC RTCCORE LOGIC ====================
+
+async function startVoiceCall() {
+    if (!privateMessageTarget) return;
+    activeCallTarget = privateMessageTarget;
+    iceCandidateQueue = [];
+    showCallUI(true);
+    callStatus.textContent = `• Calling...`;
+
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        setupPeerConnection(activeCallTarget);
+        
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        
+        window.socket.emit('call-user', { to: activeCallTarget, offer: offer });
+    } catch (err) {
+        alert("Could not access microphone. Ensure HTTPS/Localhost connections.");
+        endCall();
+    }
+}
+
+function setupPeerConnection(targetUser) {
+    peerConnection = new RTCPeerConnection(rtcConfig);
+    
+    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    
+    peerConnection.onicecandidate = (event) => {
+        if (event.candidate && window.socket) {
+            window.socket.emit('ice-candidate', { to: targetUser, candidate: event.candidate });
+        }
+    };
+    
+    peerConnection.ontrack = (event) => {
+        let audioEl = document.getElementById('remote-audio-node');
+        if (!audioEl) {
+            audioEl = document.createElement('audio');
+            audioEl.id = 'remote-audio-node';
+            audioEl.autoplay = true;
+            document.body.appendChild(audioEl);
+        }
+        audioEl.srcObject = event.streams[0];
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+        console.log(`WebRTC State: ${peerConnection.connectionState}`);
+        if (peerConnection.connectionState === "failed" || peerConnection.connectionState === "disconnected") {
+            cleanCallTracks();
+        }
+    };
+}
+
+function endCall() {
+    if (activeCallTarget && window.socket) {
+        window.socket.emit('end-call', { to: activeCallTarget });
+    }
+    cleanCallTracks();
+}
+
+function cleanCallTracks() {
+    showCallUI(false);
+    activeCallTarget = null;
+    iceCandidateQueue = [];
+    
+    const modal = document.getElementById('incoming-call-modal');
+    if (modal) modal.classList.add('hidden');
+
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+    }
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    const audioEl = document.getElementById('remote-audio-node');
+    if (audioEl) audioEl.remove();
+}
+
+function showCallUI(onCall) {
+    if (onCall) {
+        callBtn.classList.add('hidden');
+        hangupBtn.classList.remove('hidden');
+        callStatus.classList.remove('hidden');
+    } else {
+        callBtn.classList.remove('hidden');
+        hangupBtn.classList.add('hidden');
+        callStatus.classList.add('hidden');
+        callStatus.textContent = '';
+    }
+}
+
+// ==================== RENDERING UI CODE ====================
+
+function renderUsers(users) {
+    const usersList = document.getElementById('users-list');
+    if (!usersList) return;
+    
+    usersList.innerHTML = '';
+    const loggedInMe = (window.myUsername || myUsername || '').trim().toLowerCase();
+
+    users.forEach(user => {
+        if (!user || !user.username) return;
+        const isMe = user.username.trim().toLowerCase() === loggedInMe;
+
+        const li = document.createElement('li');
+        if (privateMessageTarget && user.username === privateMessageTarget) {
+            li.classList.add('private-selected');
+        }
+
+        const labelSpan = document.createElement('span');
+        if (isMe) {
+            labelSpan.innerHTML = `${user.username} <span style="opacity: 0.6; font-size: 11px; margin-left: 4px;">(You)</span>`;
+            li.style.pointerEvents = 'none';
+        } else {
+            labelSpan.textContent = user.username;
+            li.onclick = function() {
+                enterPrivateMode(user.username);
+            };
+        }
+        li.appendChild(labelSpan);
+
+        const unreadCount = localUnreadMap[user.username] || 0;
+        if (!isMe && unreadCount > 0) {
+            const badge = document.createElement('span');
+            badge.className = 'notification-badge';
+            badge.textContent = unreadCount;
+            li.appendChild(badge);
+        }
+        
+        usersList.appendChild(li);
+    });
+}
+
+function renderRooms(rooms) {
+    const roomsList = document.getElementById('rooms-list');
+    if (!roomsList) return;
+    
+    roomsList.innerHTML = '';
+    rooms.forEach(roomName => {
+        const name = typeof roomName === 'string' ? roomName : roomName.room_name;
+        const li = document.createElement('li');
+        
+        // Add data attribute for straightforward CSS/JS lookups
+        li.setAttribute('data-room-name', name);
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = name;
+        li.appendChild(nameSpan);
+        
+        if (name === currentRoom && !privateMessageTarget) {
+            li.classList.add('active');
+        }
+        
+        li.onclick = function() {
+            exitPrivateMode();
+            switchRoom(name);
+        };
+
+        // Render any active pending unread counts for general rooms
+        const roomUnreadCount = roomUnreadMap[name] || 0;
+        if (roomUnreadCount > 0 && (privateMessageTarget || name !== currentRoom)) {
+            const roomBadge = document.createElement('span');
+            roomBadge.className = 'notification-badge room-badge';
+            roomBadge.textContent = roomUnreadCount;
+            li.appendChild(roomBadge);
+        }
+        
+        roomsList.appendChild(li);
+    });
+}
+
+function updateRoomUnreadBadge(roomName, serverCount) {
+    const finalCount = serverCount !== undefined ? serverCount : (roomUnreadMap[roomName] || 0) + 1;
+    roomUnreadMap[roomName] = finalCount;
+    
+    const roomLi = document.querySelector(`[data-room-name="${roomName}"]`);
+    if (roomLi) {
+        let badge = roomLi.querySelector('.room-badge');
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'notification-badge room-badge';
+            roomLi.appendChild(badge);
+        }
+        badge.textContent = finalCount;
+    }
+}
+
+function enterPrivateMode(targetUsername) {
+    privateMessageTarget = targetUsername;
+    currentRoomName.classList.add('hidden');
+    privateModeIndicator.classList.remove('hidden');
+    privateTargetUser.textContent = targetUsername;
+    
+    callBtn.classList.remove('hidden');
+    
+    // --- FIXED HERE: Remove the .active background color from public chat list items ---
+    const allRoomItems = document.querySelectorAll('#rooms-list li');
+    allRoomItems.forEach(item => {
+        item.classList.remove('active');
+    });
+    
+    localUnreadMap[targetUsername] = 0;
+    renderUsers(cachedUsersList);
+    window.socket.emit('load-private-history', targetUsername);
+}
+
+function exitPrivateMode() {
+    privateMessageTarget = null;
+    privateModeIndicator.classList.add('hidden');
+    currentRoomName.classList.remove('hidden');
+    
+    cleanCallTracks();
+    callBtn.classList.add('hidden');
+    
+    switchRoom(currentRoom);
+}
+
+function switchRoom(roomName) {
+    currentRoom = roomName;
+    currentRoomName.textContent = roomName;
+    
+    // Clear unread values when entering a public channel
+    roomUnreadMap[roomName] = 0;
+    
+    const roomLi = document.querySelector(`[data-room-name="${roomName}"]`);
+    if (roomLi) {
+        const badge = roomLi.querySelector('.room-badge');
+        if (badge) badge.remove();
+    }
+    
+    // Update active classes around rooms elements list
+    const allRoomItems = document.querySelectorAll('#rooms-list li');
+    allRoomItems.forEach(item => {
+        if (item.getAttribute('data-room-name') === roomName) {
+            item.classList.add('active');
+        } else {
+            item.classList.remove('active');
+        }
+    });
+
+    window.socket.emit('join-room', roomName);
+}
+
+function sendMessage() {
+    const text = messageInput.value.trim();
+    if (!text || !window.socket) return;
+    
+    if (privateMessageTarget) {
+        window.socket.emit('private-message', {
+            to: privateMessageTarget,
+            text: text
+        });
+    } else {
+        window.socket.emit('send-message', {
+            text: text
+        });
+    }
+    
+    messageInput.value = '';
+    messageInput.focus();
+}
+
+function displayMessage(data) {
+    let sender = data.from || data.username || data.sender_username;
+    let rawText = data.text || data.message_text;
+    const timeStampStr = data.time || data.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    if (!sender) return;
+
+    let fileData = data.fileData;
+    let fileType = data.fileType;
+    let fileName = data.fileName;
+    let isFileType = data.type === 'public-file' || data.type === 'private-file' || fileData;
+
+    if (rawText && rawText.startsWith('__FILE_PAYLOAD__:')) {
+        try {
+            const parsedFile = JSON.parse(rawText.replace('__FILE_PAYLOAD__:', ''));
+            fileData = parsedFile.fileData;
+            fileType = parsedFile.fileType;
+            fileName = parsedFile.fileName;
+            isFileType = true;
+        } catch(e) {
+            console.error("Failed parsing inline asset attachment", e);
+        }
+    }
+
+    const msgContainer = document.createElement('div');
+    msgContainer.className = 'message';
+
+    const loginUserMatch = (window.myUsername || '').trim();
+    if (sender === loginUserMatch) {
+        msgContainer.classList.add('sent');
+    } else {
+        msgContainer.classList.add('received');
+    }
+
+    const bubbleCard = document.createElement('div');
+
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'msg-meta';
+    metaDiv.textContent = sender === loginUserMatch ? `You • ${timeStampStr}` : `${sender} • ${timeStampStr}`;
+    bubbleCard.appendChild(metaDiv);
+    
+    const textDiv = document.createElement('div');
+    textDiv.className = 'msg-text';
+
+    if (isFileType) {
+        if (fileType && fileType.startsWith('image/')) {
+            textDiv.innerHTML = `<img src="${fileData}" style="max-width: 200px; display: block; border-radius: 4px; margin-top: 4px;" alt="${fileName || 'Image'}"/>`;
+        } else {
+            textDiv.innerHTML = `<a href="${fileData}" download="${fileName || 'file'}" style="color: #667eea; text-decoration: underline; font-weight: bold;">📥 Download ${fileName || 'Attachment'}</a>`;
+        }
+    } else {
+        if (!rawText) return;
+        textDiv.textContent = rawText;
+    }
+    
+    bubbleCard.appendChild(textDiv);
+    msgContainer.appendChild(bubbleCard);
+    messagesDisplay.appendChild(msgContainer);
+    
+    messagesDisplay.scrollTop = messagesDisplay.scrollHeight;
+}
+
+if (sendBtn) sendBtn.addEventListener('click', sendMessage);
+if (messageInput) messageInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+if (backToRoomBtn) backToRoomBtn.addEventListener('click', exitPrivateMode);
+
+if (callBtn) callBtn.addEventListener('click', startVoiceCall);
+if (hangupBtn) hangupBtn.addEventListener('click', endCall);
