@@ -1,13 +1,74 @@
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const https = require('https');
+const fs = require('fs');
 const path = require('path');
-const db = require('./database'); 
+const forge = require('node-forge'); // Replaced child_process with node-forge
+const { Server } = require('socket.io');
+const db = require('./database');
 
 const app = express();
-const server = http.createServer(app);
+
+// ==================== AUTO-GENERATE SSL CERTIFICATES ====================
+
+const keysDir = path.join(__dirname, 'keys');
+const keyPath = path.join(keysDir, 'key.pem');
+const certPath = path.join(keysDir, 'cert.pem');
+
+// Ensure the /keys directory exists
+if (!fs.existsSync(keysDir)) {
+  fs.mkdirSync(keysDir, { recursive: true });
+}
+
+// Check if certificates are missing, then auto-generate them using node-forge
+if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+  console.log('SSL certificates not found in /keys. Generating self-signed certificates via node-forge...');
+  try {
+    const pki = forge.pki;
+    const keys = pki.rsa.generateKeyPair(2048);
+    const cert = pki.createCertificate();
+
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = '01';
+    cert.validity.notBefore = new Date();
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
+
+    const attrs = [
+      { name: 'commonName', value: 'localhost' },
+      { name: 'countryName', value: 'US' },
+      { shortName: 'ST', value: 'State' },
+      { name: 'localityName', value: 'City' },
+      { name: 'organizationName', value: 'Dev' },
+      { shortName: 'OU', value: 'Local' }
+    ];
+    cert.setSubject(attrs);
+    cert.setIssuer(attrs);
+    cert.sign(keys.privateKey, forge.md.sha256.create());
+
+    const pemKey = pki.privateKeyToPem(keys.privateKey);
+    const pemCert = pki.certificateToPem(cert);
+
+    fs.writeFileSync(keyPath, pemKey);
+    fs.writeFileSync(certPath, pemCert);
+    console.log('Certificates generated successfully via node-forge.');
+  } catch (error) {
+    console.error('Failed to generate SSL certificates automatically:', error.message);
+    process.exit(1);
+  }
+}
+
+// Load SSL options
+const serverOptions = {
+  key: fs.readFileSync(keyPath),
+  cert: fs.readFileSync(certPath)
+};
+
+// Create Native HTTPS Server
+const server = https.createServer(serverOptions, app);
+
+// INCREASE THRESHOLD BASE FOR BASE64 RECORDINGS (100MB)
 const io = new Server(server, {
-  maxHttpBufferSize: 10 * 1024 * 1024 // 10MB for file uploads
+  maxHttpBufferSize: 100 * 1024 * 1024
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -44,7 +105,7 @@ app.post('/api/login', async (req, res) => {
 // ==================== SOCKET.IO HANDLING ====================
 
 const users = new Map(); // socket.id -> { username, room, sessionId }
-const activeUsernames = new Set(); 
+const activeUsernames = new Set();
 const rooms = ['General', 'Technology', 'Academic', 'Lounge'];
 const unreadCounters = new Map(); // username -> { roomOrUser: count }
 
@@ -76,7 +137,7 @@ io.on('connection', (socket) => {
     try {
       await roomsInitialized;
       if (!username) return socket.emit('authentication-error', 'Username is required.');
-      
+
       const normalizedUsername = username.trim();
       const user = await db.getUserByUsername(normalizedUsername);
       if (!user) return socket.emit('authentication-error', 'User not found.');
@@ -93,34 +154,31 @@ io.on('connection', (socket) => {
       const roomId = await db.getRoomId('General');
       const generalHistory = await db.getRoomHistory(roomId);
       const unreadCounts = await db.getAllUnreadCounts(normalizedUsername);
-      
-      // Store baseline unread counters inside our server state
+
       unreadCounters.set(normalizedUsername, unreadCounts || {});
 
-      // Successfully authenticated
       socket.emit('authentication-success', {
         username: normalizedUsername,
         currentRoom: 'General',
-        rooms: rooms, 
-        allUsers: getUserList(), 
+        rooms: rooms,
+        allUsers: getUserList(),
         roomHistory: generalHistory,
         unreadCounts: unreadCounts
       });
 
       socket.to('General').emit('user-joined', { username: normalizedUsername, sessionId });
       io.emit('update-user-list', getUserList());
-      
+
     } catch (error) {
       socket.emit('authentication-error', error.message);
     }
   });
 
   // ==================== 2. WEBRTC SIGNALING ====================
-  
-  // Route SDP Offer to target peer
+
   socket.on('call-user', (data) => {
     const sender = users.get(socket.id);
-    if (!sender) return; 
+    if (!sender) return;
 
     const targetSocketId = findSocketByUsername(data.to);
     if (targetSocketId) {
@@ -131,7 +189,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Route SDP Answer back to caller
   socket.on('answer-call', (data) => {
     const targetSocketId = findSocketByUsername(data.to);
     if (targetSocketId) {
@@ -141,7 +198,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Route ICE Candidates between peers
   socket.on('ice-candidate', (data) => {
     const targetSocketId = findSocketByUsername(data.to);
     if (targetSocketId) {
@@ -151,7 +207,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle Call Disconnection / Hang up
   socket.on('end-call', (data) => {
     const targetSocketId = findSocketByUsername(data.to);
     if (targetSocketId) {
@@ -161,7 +216,6 @@ io.on('connection', (socket) => {
 
   // ==================== 3. TEXT MESSAGING & CHAT FEATURES ====================
 
-  // Switch Room
   socket.on('join-room', async (newRoom) => {
     const userData = users.get(socket.id);
     if (!userData) return;
@@ -170,7 +224,6 @@ io.on('connection', (socket) => {
     socket.join(newRoom);
     userData.room = newRoom;
 
-    // Reset unread count for this room upon user arrival
     if (unreadCounters.has(userData.username)) {
       const counters = unreadCounters.get(userData.username);
       if (counters) {
@@ -187,7 +240,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Public Room Messaging (Now tracking all public unread tallies)
   socket.on('send-message', async (data) => {
     const userData = users.get(socket.id);
     if (!userData) return;
@@ -204,9 +256,8 @@ io.on('connection', (socket) => {
     try {
       const roomId = await db.getRoomId(userData.room);
       await db.saveRoomMessage(roomId, userData.username, userData.sessionId, data.text);
-      io.to(userData.room).emit('receive-message', messageData); 
+      io.to(userData.room).emit('receive-message', messageData);
 
-      // Update unread counters for active online users outside this room focus
       for (let [targetSocketId, user] of users.entries()) {
         if (user.room !== userData.room) {
           if (!unreadCounters.has(user.username)) {
@@ -215,7 +266,6 @@ io.on('connection', (socket) => {
           const targetCounters = unreadCounters.get(user.username);
           targetCounters[userData.room] = (targetCounters[userData.room] || 0) + 1;
 
-          // Notify client to update public room unread indicator badge
           io.to(targetSocketId).emit('update-room-unread-count', {
             room: userData.room,
             count: targetCounters[userData.room]
@@ -223,70 +273,93 @@ io.on('connection', (socket) => {
         }
       }
     } catch (err) {
-      io.to(userData.room).emit('receive-message', messageData); 
+      io.to(userData.room).emit('receive-message', messageData);
     }
   });
 
-  // Private Messaging
   socket.on('private-message', async (data) => {
     const userData = users.get(socket.id);
     if (!userData || userData.username === data.to) return;
 
     const targetSocketId = findSocketByUsername(data.to);
     const currentTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // Check if the recipient already has this sender's chat layout active
+    const recipientSocket = targetSocketId ? users.get(targetSocketId) : null;
+    const isRecipientViewingChat = recipientSocket && recipientSocket.room === userData.username;
+
     const privateMsg = {
       from: userData.username,
       to: data.to,
       text: data.text,
       time: currentTime,
-      type: 'private'
+      type: 'private',
+      isRead: isRecipientViewingChat // Immediately flag true if receiver is watching your DM channel
     };
 
     try {
       await db.savePrivateMessage(userData.username, userData.sessionId, data.to, data.text);
-      
+
       if (!unreadCounters.has(data.to)) unreadCounters.set(data.to, {});
       const receiverCounters = unreadCounters.get(data.to);
-      receiverCounters[userData.username] = (receiverCounters[userData.username] || 0) + 1;
 
-      // Echo instantly back to sender
+      if (!isRecipientViewingChat) {
+         receiverCounters[userData.username] = (receiverCounters[userData.username] || 0) + 1;
+      }
+
       socket.emit('receive-message', privateMsg);
 
-      // Route straight to targeted online client if available
       if (targetSocketId) {
         io.to(targetSocketId).emit('receive-message', privateMsg);
-        io.to(targetSocketId).emit('update-unread-count', {
-          from: userData.username,
-          count: receiverCounters[userData.username]
-        });
+        if (!isRecipientViewingChat) {
+          io.to(targetSocketId).emit('update-unread-count', {
+            from: userData.username,
+            count: receiverCounters[userData.username]
+          });
+        } else {
+          // If the recipient is viewing, broadcast right back to the sender to display double ticks
+          socket.emit('messages-read', { byUser: data.to });
+        }
       }
     } catch (err) {
       console.error(err);
     }
   });
 
-  // Private History Load & Reset Counters
   socket.on('load-private-history', async (targetUsername) => {
     const userData = users.get(socket.id);
     if (!userData) return;
 
     try {
-      const history = await db.getPrivateHistory(userData.username, targetUsername);
       await db.markPrivateMessageAsRead(targetUsername, userData.username);
+      const history = await db.getPrivateHistory(userData.username, targetUsername);
 
       if (unreadCounters.has(userData.username)) {
         const counters = unreadCounters.get(userData.username);
         counters[targetUsername] = 0;
       }
 
-      socket.emit('private-history-loaded', { history, targetUsername });
+      // Explicitly inject isRead properties on individual matching logs inside historical arrays
+      const normalizedHistory = history.map(msg => {
+         if (msg.from === targetUsername) {
+            msg.isRead = true;
+         }
+         return msg;
+      });
+
+      socket.emit('private-history-loaded', { history: normalizedHistory, targetUsername });
       socket.emit('update-unread-count', { from: targetUsername, count: 0 });
+
+      // Signal the sender that their message was opened so their checkmarks swap from ✓ to ✓✓
+      const targetSocketId = findSocketByUsername(targetUsername);
+      if (targetSocketId) {
+         io.to(targetSocketId).emit('messages-read', { byUser: userData.username });
+      }
     } catch (err) {
       socket.emit('private-history-loaded', { history: [], targetUsername });
     }
   });
 
-  // Get all unread counts on fresh load request
   socket.on('get-unread-counts', async () => {
     const userData = users.get(socket.id);
     if (!userData) return;
@@ -301,7 +374,6 @@ io.on('connection', (socket) => {
 
   // ==================== 4. FILE SHARING FEATURES ====================
 
-  // Handle file sharing in public rooms (Now tracking public room unread files)
   socket.on('send-file', async (data) => {
     const userData = users.get(socket.id);
     if (!userData) return;
@@ -310,7 +382,7 @@ io.on('connection', (socket) => {
     const fileMessage = {
       from: userData.username,
       fileName: data.fileName,
-      fileData: data.fileData, // Base64 string payload
+      fileData: data.fileData,
       fileType: data.fileType,
       time: currentTime,
       type: 'public-file',
@@ -319,7 +391,7 @@ io.on('connection', (socket) => {
 
     try {
       const roomId = await db.getRoomId(userData.room);
-      
+
       const embeddedFileContent = `__FILE_PAYLOAD__:${JSON.stringify({
         fileName: data.fileName,
         fileData: data.fileData,
@@ -329,7 +401,6 @@ io.on('connection', (socket) => {
       await db.saveRoomMessage(roomId, userData.username, userData.sessionId, embeddedFileContent);
       io.to(userData.room).emit('receive-message', fileMessage);
 
-      // Distribute unread room count updates for file transmissions
       for (let [targetSocketId, user] of users.entries()) {
         if (user.room !== userData.room) {
           if (!unreadCounters.has(user.username)) {
@@ -350,21 +421,25 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle file sharing across Direct DMs
   socket.on('private-file', async (data) => {
     const userData = users.get(socket.id);
     if (!userData || userData.username === data.to) return;
 
     const targetSocketId = findSocketByUsername(data.to);
     const currentTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const recipientSocket = targetSocketId ? users.get(targetSocketId) : null;
+    const isRecipientViewingChat = recipientSocket && recipientSocket.room === userData.username;
+
     const privateFileMessage = {
       from: userData.username,
       to: data.to,
       fileName: data.fileName,
-      fileData: data.fileData, // Base64 string payload
+      fileData: data.fileData,
       fileType: data.fileType,
       time: currentTime,
-      type: 'private-file'
+      type: 'private-file',
+      isRead: isRecipientViewingChat
     };
 
     try {
@@ -375,21 +450,26 @@ io.on('connection', (socket) => {
       })}`;
 
       await db.savePrivateMessage(userData.username, userData.sessionId, data.to, embeddedFileContent);
-      
+
       if (!unreadCounters.has(data.to)) unreadCounters.set(data.to, {});
       const receiverCounters = unreadCounters.get(data.to);
-      receiverCounters[userData.username] = (receiverCounters[userData.username] || 0) + 1;
 
-      // Echo directly back to sender terminal
+      if (!isRecipientViewingChat) {
+         receiverCounters[userData.username] = (receiverCounters[userData.username] || 0) + 1;
+      }
+
       socket.emit('receive-message', privateFileMessage);
 
-      // Route straight to targeted online recipient
       if (targetSocketId) {
         io.to(targetSocketId).emit('receive-message', privateFileMessage);
-        io.to(targetSocketId).emit('update-unread-count', {
-          from: userData.username,
-          count: receiverCounters[userData.username]
-        });
+        if (!isRecipientViewingChat) {
+          io.to(targetSocketId).emit('update-unread-count', {
+            from: userData.username,
+            count: receiverCounters[userData.username]
+          });
+        } else {
+          socket.emit('messages-read', { byUser: data.to });
+        }
       }
     } catch (err) {
       console.error("Failed to save private file attachment history:", err);
@@ -397,7 +477,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Clean Disconnect
   socket.on('disconnect', async () => {
     const userData = users.get(socket.id);
     if (userData) {
@@ -411,5 +490,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on all network interfaces via port ${PORT}`);
+    console.log(`Secure LAN server running on all network interfaces via port ${PORT} (HTTPS)`);
 });
